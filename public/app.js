@@ -47,6 +47,8 @@
   let contractIface = null;  // full ABI interface (incl. custom errors) for revert decoding
   let encodedCalldata = null;
   let gasMode = "market";
+  let gasAuto = true;        // auto-estimate the gas limit on-chain
+  let gasTimer = null;
   let ethUsd = null, ethUsdAt = 0;
   let feeGp = null, feeGpAt = 0;
   let running = false, stopFlag = false;
@@ -209,6 +211,7 @@
       (fast ? " fastest <b>" + fast.latency + "ms</b> · block <b>" + fast.block + "</b> · chainId <b>" + fast.chainId + "</b>" : "");
     log(okc + "/" + pool.length + " RPC endpoints live.", okc ? "ok" : "bad");
     refreshGas();
+    maybeAutoGas();
   };
 
   // ---------- wallets ----------
@@ -238,6 +241,7 @@
       }
     }
     updateTotal();
+    maybeAutoGas();
   };
 
   // ---------- contract: address + ABI ----------
@@ -339,6 +343,7 @@
       $("fnList").innerHTML = chips;
       $("abiStatus").innerHTML = '<span class="ok">Loaded ' + frags.length + " functions</span> via " + res.source + ". Pick the mint function:";
       log("ABI loaded (" + res.source + "): " + frags.length + " callable functions.", "ok");
+      maybeAutoGas();
     } catch (e) {
       $("abiStatus").innerHTML = '<span class="bad">ABI fetch failed: ' + esc(e.shortMessage || e.message) + "</span>";
     }
@@ -380,6 +385,7 @@
       $("calldataOut").value = encodedCalldata;
     } catch (e) { encodedCalldata = null; $("calldataOut").value = "⚠ " + (e.shortMessage || e.message); }
     updateTotal();
+    maybeAutoGas();
   }
 
   function getCalldata() {
@@ -398,6 +404,7 @@
       contractAddr = tx.to; $("contract").value = tx.to || "";
       $("calldata").value = tx.data || "0x"; $("value").value = E.formatEther(tx.value || 0n);
       log("Imported from " + shrink(h) + " → to " + shrink(tx.to) + " value " + E.formatEther(tx.value || 0n) + " calldata " + (tx.data || "0x").slice(0, 10) + "…", "ok");
+      maybeAutoGas();
     } catch (e) { log("Import failed: " + (e.shortMessage || e.message), "bad"); }
   };
 
@@ -493,8 +500,8 @@
     renderGasChart(fees.gasPrice || E.parseUnits("0.047", "gwei"), gl, px);
     updateTotal(px);
   }
-  $("gaslimit").addEventListener("input", () => refreshGas(false));
-  $("count").addEventListener("input", () => updateTotal());
+  $("gaslimit").addEventListener("input", () => { gasAuto = false; $("gasAutoBtn").classList.remove("on"); $("gasAutoLbl").textContent = "(manual)"; refreshGas(false); });
+  $("count").addEventListener("input", () => { updateTotal(); maybeAutoGas(); });
 
   async function updateTotal(px) {
     const gl = $("gaslimit").value.trim() ? BigInt($("gaslimit").value.trim()) : 0n;
@@ -503,7 +510,7 @@
     const bulk = $("method") && $("method").value === "bulk";
     const mints = count * w;
     const onchainTx = bulk ? w : mints;
-    const perTxGas = bulk ? gl * BigInt(count) + 120000n : gl;
+    const perTxGas = gl; // gas limit is per on-chain tx (auto-estimate already accounts for bulk's N mints)
     let costStr = "";
     if (gl > 0n) {
       try {
@@ -519,18 +526,48 @@
     $("totalStatus").innerHTML = wallets.length + " wallet(s) × " + count + costStr;
   }
 
-  $("estGas").onclick = async () => {
-    if (!wallets.length) { log("Load a wallet first (used as the from address).", "bad"); return; }
-    if (!contractAddr) { log("Set the contract address first.", "bad"); return; }
+  // ---------- auto gas limit ----------
+  function defaultGasLimit() {
+    const count = Math.max(1, parseInt($("count").value.trim() || "1", 10));
+    return $("method").value === "bulk" ? BigInt(140000 + 70000 * count) : 300000n;
+  }
+  // estimate the gas for ONE on-chain tx of the current mint (deploy for bulk); null if it can't
+  async function estimateGasLimit() {
+    if (!wallets.length || !contractAddr) return null;
+    if (!pool.length) buildPool();
     try {
-      const g = await rpc((p) => p.estimateGas({ from: wallets[0].address, to: contractAddr, data: getCalldata(), value: E.parseEther($("value").value.trim() || "0") }));
-      const buffered = (g * 130n) / 100n;
-      $("gaslimit").value = buffered.toString();
-      log("estimateGas " + g + " → set " + buffered + " (+30%)", "ok"); refreshGas();
-    } catch (e) {
-      log("Estimate failed — would revert: " + decodeRevert(e), "bad");
-      log("Fix the call, or set a gas limit manually to skip estimation.", "warn");
-    }
+      const data = getCalldata();
+      const value = E.parseEther($("value").value.trim() || "0");
+      let g;
+      if ($("method").value === "bulk") {
+        const count = Math.max(1, parseInt($("count").value.trim() || "1", 10));
+        const args = E.AbiCoder.defaultAbiCoder().encode(["address", "uint256", "bytes"], [contractAddr, BigInt(count), data]);
+        g = await rpc((p) => p.estimateGas({ from: wallets[0].address, data: MINTER_BYTECODE + args.slice(2), value: value * BigInt(count) }));
+      } else {
+        g = await rpc((p) => p.estimateGas({ from: wallets[0].address, to: contractAddr, data, value }));
+      }
+      return (g * 130n) / 100n; // +30% buffer
+    } catch (e) { return null; }
+  }
+  function setGasLimit(v) { $("gaslimit").value = String(v); refreshGas(false); }
+  // debounced auto-fill when the config is ready
+  function maybeAutoGas() {
+    if (!gasAuto) return;
+    clearTimeout(gasTimer);
+    gasTimer = setTimeout(async () => {
+      if (!gasAuto || !wallets.length || !contractAddr) return;
+      const g = await estimateGasLimit();
+      if (!gasAuto) return;
+      setGasLimit((g || defaultGasLimit()).toString());
+      $("gasAutoLbl").textContent = g ? "(auto: estimated)" : "(auto: default — call not estimatable yet)";
+    }, 400);
+  }
+  $("gasAutoBtn").onclick = () => {
+    gasAuto = !gasAuto;
+    $("gasAutoBtn").classList.toggle("on", gasAuto);
+    $("gaslimit").readOnly = gasAuto;
+    if (gasAuto) { $("gasAutoLbl").textContent = "(auto)"; maybeAutoGas(); }
+    else { $("gasAutoLbl").textContent = "(manual)"; $("gaslimit").focus(); }
   };
 
   // ---------- execute ----------
@@ -544,6 +581,7 @@
     $("methodHint").textContent = METHOD_HINTS[m] || "";
     $("countLbl").textContent = m === "bulk" ? "Mints per tx" : "Txs / wallet";
     updateTotal();
+    maybeAutoGas();
   }
   $("method").onchange = applyMethodUI;
 
@@ -566,7 +604,8 @@
     $("triggerValBox").style.display = t === "now" ? "none" : "";
     $("triggerValLbl").textContent = t === "block" ? "Block number" : "Unix time (s)";
   };
-  $("value").addEventListener("input", () => updateTotal());
+  $("value").addEventListener("input", () => { updateTotal(); maybeAutoGas(); });
+  $("calldata").addEventListener("input", () => maybeAutoGas());
   $("stop").onclick = () => { stopFlag = true; log("Stop requested.", "warn"); };
 
   async function waitTrigger() {
@@ -641,13 +680,21 @@
     try {
       data = getCalldata();
       value = E.parseEther($("value").value.trim() || "0");
-      const gl = $("gaslimit").value.trim(); if (!gl) throw new Error("Set a gas limit.");
-      gasLimit = BigInt(gl);
       count = intField("count", 1);
       untilN = repeat ? intField("untilN", 0) : 0;
       interval = repeat ? intField("interval", 0) : 0;
       cid = BigInt($("chainId").value.trim() || "0"); if (cid <= 0n) throw new Error("Set a valid Chain ID.");
       fees = await computeFees(true); // force-fresh fee data for the actual broadcast
+      // gas limit: auto-estimate fresh on-chain, else use the manual field
+      if (gasAuto) {
+        const g = await estimateGasLimit();
+        gasLimit = g || defaultGasLimit();
+        setGasLimit(gasLimit.toString());
+        log("Gas limit " + gasLimit + (g ? " (auto-estimated)" : " (default — call not estimatable yet)"), "");
+      } else {
+        const gl = $("gaslimit").value.trim(); if (!gl) throw new Error("Set a gas limit, or turn Auto on.");
+        gasLimit = BigInt(gl);
+      }
     } catch (e) { log("Config error: " + (e.shortMessage || e.message), "bad"); return; }
 
     // ----- mint method: how the tx is built + submitted -----
@@ -656,7 +703,7 @@
     const mints = count * wallets.length;                 // NFTs attempted
     const onchainTx = isBulk ? wallets.length : mints;    // actual on-chain txs
     const perTxValue = isBulk ? value * BigInt(count) : value;
-    const perTxGas = isBulk ? gasLimit * BigInt(count) + 120000n : gasLimit;
+    const perTxGas = gasLimit; // per on-chain tx (auto-estimate/default already account for bulk's N mints)
     let submitEps = method === "seq" ? getSequencerEps() : null;
     if (method === "seq" && !submitEps) { log("No sequencer endpoint for this chain — using RPC pool.", "warn"); }
 

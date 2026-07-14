@@ -179,9 +179,9 @@
     <h2>Gas — est. cost per tx</h2>
     <div class="bars" id="gasChart"></div>
     <div class="row">
-      <div class="f"><label>Gas limit</label><input id="gaslimit" placeholder="e.g. 200000" spellcheck="false" autocomplete="off"></div>
-      <button class="ghost" id="gasCustomBtn">Custom</button>
-      <button class="ghost" id="estGas">Estimate</button>
+      <div class="f"><label>Gas limit <span class="kv" id="gasAutoLbl">(auto)</span></label><input id="gaslimit" placeholder="auto" readonly spellcheck="false" autocomplete="off"></div>
+      <button class="ghost on" id="gasAutoBtn" title="Auto-estimate the gas limit on-chain">Auto</button>
+      <button class="ghost" id="gasCustomBtn">Custom fee</button>
       <button class="ghost" id="refreshGas">↻</button>
     </div>
     <div class="row hidden" id="customFees" style="margin-top:8px">
