@@ -44,6 +44,7 @@
   let contractAddr = null;
   let abiFragments = [];     // available FunctionFragment list
   let selectedFrag = null;
+  let contractIface = null;  // full ABI interface (incl. custom errors) for revert decoding
   let encodedCalldata = null;
   let gasMode = "market";
   let ethUsd = null, ethUsdAt = 0;
@@ -68,6 +69,18 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const shortHost = (u) => { try { return new URL(u).host; } catch (e) { return u; } };
+  // decode a revert into a human reason: contract's own custom errors, Error(string), or known selectors
+  const KNOWN_ERRORS = { "0x15e26ff3": "OnlyAllowedSeaDrop() — mint through the SeaDrop contract, not this one" };
+  function decodeRevert(e) {
+    const data = (e && (e.data || (e.info && e.info.error && e.info.error.data) || (e.error && e.error.data))) || null;
+    if (data && data !== "0x") {
+      if (contractIface) { try { const er = contractIface.parseError(data); return er.name + "(" + er.args.map(String).join(", ") + ")"; } catch (_) {} }
+      if (data.slice(0, 10) === "0x08c379a0") { try { return '"' + E.AbiCoder.defaultAbiCoder().decode(["string"], "0x" + data.slice(10))[0] + '"'; } catch (_) {} }
+      if (KNOWN_ERRORS[data.slice(0, 10)]) return KNOWN_ERRORS[data.slice(0, 10)];
+      return "custom error " + data.slice(0, 10) + " (not in the loaded ABI)";
+    }
+    return e.shortMessage || e.reason || e.message || "reverted";
+  }
 
   // ---------- key wiping ----------
   function wipeKeys() {
@@ -296,9 +309,15 @@
     try {
       const res = await fetchAbi(addr);
       let frags = [];
+      contractIface = null;
       if (res.abi) {
         const iface = new E.Interface(res.abi);
+        contractIface = iface;   // keep the full interface so we can decode this contract's custom errors
         iface.forEachFunction((f) => { if (f.stateMutability !== "view" && f.stateMutability !== "pure") frags.push(f); });
+        // SeaDrop collections must be minted THROUGH the SeaDrop contract, not directly
+        if (frags.some((f) => f.name === "mintSeaDrop")) {
+          log("⚠ SeaDrop collection: don't call mintSeaDrop directly (reverts OnlyAllowedSeaDrop). Mint via the SeaDrop contract's mintPublic — set the contract field to the SeaDrop address.", "warn");
+        }
       } else if (res.selectors && res.selectors.length) {
         for (const sig of res.selectors) {
           try { const f = E.FunctionFragment.from("function " + sig); frags.push(f); } catch (e) {}
@@ -509,8 +528,8 @@
       $("gaslimit").value = buffered.toString();
       log("estimateGas " + g + " → set " + buffered + " (+30%)", "ok"); refreshGas();
     } catch (e) {
-      log("Estimate failed (mint may not be live / would revert): " + (e.shortMessage || e.message), "warn");
-      log("Set a gas limit manually (e.g. 200000–300000) and skip estimation.", "warn");
+      log("Estimate failed — would revert: " + decodeRevert(e), "bad");
+      log("Fix the call, or set a gas limit manually to skip estimation.", "warn");
     }
   };
 
@@ -650,9 +669,14 @@
     if (realCid == null) { log("Can't reach any RPC to confirm the chain — test the pool first.", "bad"); return; }
     if (realCid !== cid) { log("Chain ID mismatch: field=" + cid + " but RPC reports " + realCid + ". Fix Chain ID before firing.", "bad"); return; }
 
+    // pre-flight: simulate the exact mint once so we don't spend gas on a guaranteed revert
+    let preflight = "";
+    try { await simulateOnce(); preflight = "✅ pre-flight simulate OK.\n"; }
+    catch (e) { preflight = "⛔ PRE-FLIGHT SIMULATE REVERTS: " + decodeRevert(e) + "\nThis will fail on-chain and waste gas. Fire anyway?\n"; }
+
     const totalEth = value * BigInt(mints);
     const ok = window.confirm(
-      "FIRE MINT · " + method.toUpperCase() + "\n\n" + mints + " mint(s) via " + onchainTx + " tx" +
+      "FIRE MINT · " + method.toUpperCase() + "\n\n" + preflight + "\n" + mints + " mint(s) via " + onchainTx + " tx" +
       (isBulk ? " (bulk: 1 tx × " + count + " mints × " + wallets.length + " wallet)" : " (" + wallets.length + " wallet × " + count + ")") +
       "\nto " + contractAddr + "\nchainId " + cid + "\nTOTAL VALUE ≈ " + E.formatEther(totalEth) + " ETH\n" +
       (isBulk ? "⚠ BULK: set the mint recipient to YOUR address in the args; reverts if the contract requires tx.origin==msg.sender.\n" : "") +
@@ -735,24 +759,24 @@
     finally { running = false; $("fire").disabled = false; }
   };
 
+  // one eth_call of the exact mint the current settings would fire; throws on revert
+  async function simulateOnce() {
+    const data = getCalldata();
+    const value = E.parseEther($("value").value.trim() || "0");
+    if ($("method").value === "bulk") {
+      const count = Math.max(1, parseInt($("count").value.trim() || "1", 10));
+      const args = E.AbiCoder.defaultAbiCoder().encode(["address", "uint256", "bytes"], [contractAddr, BigInt(count), data]);
+      await rpc((p) => p.call({ from: wallets[0].address, data: MINTER_BYTECODE + args.slice(2), value: value * BigInt(count) }));
+    } else {
+      await rpc((p) => p.call({ from: wallets[0].address, to: contractAddr, data, value }));
+    }
+  }
   $("simulate").onclick = async () => {
     if (!pool.length) buildPool();
     if (!wallets.length) { log("Load a wallet first.", "bad"); return; }
     if (!contractAddr) { log("Set the contract address.", "bad"); return; }
-    try {
-      const data = getCalldata();
-      const value = E.parseEther($("value").value.trim() || "0");
-      if ($("method").value === "bulk") {
-        // simulate the BulkMinter deploy running the mint loop `count` times (eth_call on the initcode)
-        const count = Math.max(1, parseInt($("count").value.trim() || "1", 10));
-        const args = E.AbiCoder.defaultAbiCoder().encode(["address", "uint256", "bytes"], [contractAddr, BigInt(count), data]);
-        await rpc((p) => p.call({ from: wallets[0].address, data: MINTER_BYTECODE + args.slice(2), value: value * BigInt(count) }));
-        log("Simulate OK — bulk deploy ran " + count + " mint(s) without reverting.", "ok");
-      } else {
-        const res = await rpc((p) => p.call({ from: wallets[0].address, to: contractAddr, data, value }));
-        log("Simulate OK (no revert). return " + (res === "0x" ? "(empty)" : res.slice(0, 42) + "…"), "ok");
-      }
-    } catch (e) { log("Simulate reverted: " + (e.shortMessage || e.reason || e.message), "bad"); }
+    try { await simulateOnce(); log("Simulate OK — this mint would not revert.", "ok"); }
+    catch (e) { log("Simulate reverted: " + decodeRevert(e), "bad"); }
   };
 
   // ---------- init ----------
