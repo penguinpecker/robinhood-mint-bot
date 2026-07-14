@@ -1,0 +1,9 @@
+node_modules/
+.vercel/
+.DS_Store
+*.log
+npm-debug.log*
+.env
+.env.*
+scratch/
+*.tmp

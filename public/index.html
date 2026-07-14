@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src https: wss: http: ws:; img-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<link rel="preconnect" href="https://rpc.mainnet.chain.robinhood.com" crossorigin>
+<link rel="preconnect" href="https://robinhoodchain.blockscout.com" crossorigin>
+<link rel="preconnect" href="https://api.coingecko.com" crossorigin>
+<title>RH Mint Bot</title>
+<style>
+  :root{
+    --bg:#000; --panel:#0a0d0b; --line:#173a26;
+    --green:#00ff6a; --green-dim:#0a9d4c; --white:#eaf2ec; --mut:#6f8a79;
+    --red:#ff4d5e; --amber:#ffce4d;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--bg);color:var(--white);font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:14px;max-width:920px;margin:0 auto}
+  h1{font-size:15px;margin:0;color:var(--green);letter-spacing:.06em}
+  h1 span{color:var(--mut);font-weight:400}
+  h2{font-size:12px;margin:0 0 8px;color:var(--green);letter-spacing:.08em;text-transform:uppercase}
+  .top{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:10px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;margin-bottom:10px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}
+  .row>.f{flex:1 1 140px;min-width:120px}
+  label{display:block;color:var(--mut);font-size:11px;margin:0 0 3px}
+  input,textarea,select{width:100%;background:#05060559;color:var(--white);border:1px solid var(--line);border-radius:4px;padding:7px 8px;font:12px ui-monospace,Menlo,monospace;outline:none}
+  input:focus,textarea:focus,select:focus{border-color:var(--green)}
+  textarea{resize:vertical;min-height:44px}
+  .mask{-webkit-text-security:disc}
+  button{background:transparent;color:var(--green);border:1px solid var(--green-dim);border-radius:4px;padding:7px 12px;font:600 12px ui-monospace,Menlo,monospace;cursor:pointer;white-space:nowrap}
+  button:hover{background:var(--green);color:#000;border-color:var(--green)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.ghost{color:var(--mut);border-color:var(--line)}
+  button.ghost:hover{background:var(--line);color:var(--white)}
+  button.danger{color:var(--red);border-color:#5a2028}
+  button.danger:hover{background:var(--red);color:#000;border-color:var(--red)}
+  button.fire{background:var(--green);color:#000;border-color:var(--green);font-size:14px;padding:11px 22px;flex:1}
+  button.fire:hover{background:#4dffa0}
+  .banner{border:1px solid #5a4a10;background:#120e02;color:var(--amber);border-radius:6px;padding:10px 12px;margin-bottom:10px;font-size:11.5px}
+  .banner b{color:#ffe08a}
+  .hint{color:var(--mut);font-size:11px;margin-top:5px}
+  .status{font-size:12px;color:var(--mut);margin-top:8px;word-break:break-all}
+  .status b{color:var(--white)}
+  .ok{color:var(--green)} .bad{color:var(--red)} .warn{color:var(--amber)}
+  .pill{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:1px 8px;margin:2px 4px 0 0;font-size:11px;color:var(--mut)}
+  .pill b{color:var(--green)}
+  .chip{display:inline-block;border:1px solid var(--line);border-radius:4px;padding:5px 9px;margin:3px 5px 0 0;font-size:11.5px;color:var(--white);cursor:pointer;background:#05060559}
+  .chip:hover{border-color:var(--green)}
+  .chip.on{background:var(--green);color:#000;border-color:var(--green)}
+  .chip .tag{font-size:9.5px;padding:0 5px;border-radius:99px;margin-left:6px;vertical-align:middle}
+  .chip .tag.pub{background:#0a9d4c;color:#000}
+  .chip .tag.wl{background:#ffce4d;color:#000}
+  .chip .tag.adm{background:#5a2028;color:#fff}
+  .seg{display:flex;gap:0;border:1px solid var(--line);border-radius:4px;overflow:hidden;width:fit-content;flex-wrap:wrap}
+  .seg button{border:0;border-radius:0;border-right:1px solid var(--line);padding:6px 12px}
+  .seg button.on{background:var(--green);color:#000}
+  .grow{flex:2 1 260px}
+  .usd{color:var(--green);font-weight:700}
+  pre#log{background:#050705;border:1px solid var(--line);border-radius:6px;padding:10px;height:230px;overflow:auto;margin:0;white-space:pre-wrap;word-break:break-all;font-size:11.5px;color:#bfe9cf}
+  .logbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+  a{color:var(--green)}
+  .kv{color:var(--mut)}
+  .foot{color:var(--mut);font-size:11px;margin-top:12px;line-height:1.7}
+  .hidden{display:none}
+  table.rpc{width:100%;border-collapse:collapse;margin-top:8px;font-size:11px}
+  table.rpc td{border-top:1px solid var(--line);padding:4px 6px;color:var(--mut)}
+  table.rpc td b{color:var(--white)}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <h1>RH&nbsp;MINT&nbsp;BOT <span>· client-side · keys never leave your browser</span></h1>
+  <button class="danger" id="panic" title="Wipe all keys from memory + fields">WIPE KEYS</button>
+</div>
+
+<div class="banner">
+  <b>How this stays safe.</b> This page is static — it's served to you but runs <b>entirely in your browser</b>.
+  Your private key is held in memory only, <b>never sent to this site, any server, disk, or storage</b>, and only ever
+  leaves as a <b>signed transaction</b>, sent from <b>your own IP</b> directly to the RPCs you choose. Nothing is saved; refresh wipes it.
+  Use a <b>dedicated burner wallet</b> funded with only what you'll spend.
+</div>
+
+<!-- 1 NETWORK -->
+<div class="card">
+  <h2>1 · Network</h2>
+  <div class="row">
+    <div class="f">
+      <label>Chain preset</label>
+      <select id="preset">
+        <option value="rh-main">Robinhood Mainnet (4663)</option>
+        <option value="rh-test">Robinhood Testnet (46630)</option>
+        <option value="custom">Custom</option>
+      </select>
+    </div>
+    <div class="f">
+      <label>Chain ID</label>
+      <input id="chainId" value="4663" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="f grow">
+      <label>Explorer API base (for ABI fetch)</label>
+      <input id="explorerApi" spellcheck="false" autocomplete="off">
+    </div>
+  </div>
+  <div class="f" style="margin-top:8px">
+    <label>RPC pool — one URL per line, rotated to dodge rate limits. Lines starting with # are ignored. Add your own Alchemy/QuickNode key for continuous use.</label>
+    <textarea id="rpcs" rows="4" spellcheck="false" autocomplete="off"></textarea>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="testRpcs">Test / connect pool</button>
+    <div class="f grow"><div class="status" id="netStatus">Not connected.</div></div>
+  </div>
+  <div id="rpcTable"></div>
+</div>
+
+<!-- 2 WALLET -->
+<div class="card">
+  <h2>2 · Wallet keys</h2>
+  <div class="f">
+    <label>Private key(s) — one per line for multi-wallet. Never saved, never sent.</label>
+    <textarea id="keys" class="mask" rows="3" placeholder="0x... (one per line)" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="loadKeys">Load wallets</button>
+    <button class="ghost" id="toggleMask">Show</button>
+    <button class="ghost" id="clearKeysField">Clear field</button>
+    <button class="danger" id="wipe2">Wipe keys</button>
+  </div>
+  <div class="status" id="walletStatus">No wallets loaded.</div>
+</div>
+
+<!-- 3 CONTRACT -->
+<div class="card">
+  <h2>3 · Contract &amp; mint function</h2>
+  <div class="row">
+    <div class="f grow">
+      <label>Contract link or address (paste the explorer URL or 0x…)</label>
+      <input id="contract" placeholder="https://robinhoodchain.blockscout.com/address/0x…  or  0x…" spellcheck="false" autocomplete="off">
+    </div>
+    <button id="fetchFns">Fetch functions</button>
+  </div>
+  <div class="status" id="abiStatus"></div>
+  <div id="fnList" style="margin-top:8px"></div>
+
+  <div id="fnParams" class="hidden" style="margin-top:10px">
+    <label id="fnPickedLbl" style="color:var(--green)"></label>
+    <div id="paramInputs"></div>
+    <div class="row" style="margin-top:8px">
+      <div class="f">
+        <label>Value per tx (ETH) — for payable mints</label>
+        <input id="value" value="0" spellcheck="false" autocomplete="off">
+      </div>
+      <div class="f grow">
+        <label>Encoded calldata (auto)</label>
+        <input id="calldataOut" readonly spellcheck="false" style="color:var(--mut)">
+      </div>
+    </div>
+  </div>
+
+  <details style="margin-top:10px">
+    <summary style="cursor:pointer;color:var(--green);font-size:11px">Manual / raw calldata (unverified contracts, or paste from a working mint tx)</summary>
+    <div style="margin-top:8px">
+      <div class="row">
+        <div class="f grow">
+          <label>Raw calldata (0x…) — overrides the picker above when set</label>
+          <textarea id="calldata" rows="2" placeholder="0x..." spellcheck="false" autocomplete="off"></textarea>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div class="f grow">
+          <label>Import to / calldata / value from an existing mint tx hash</label>
+          <input id="txhash" placeholder="0x… tx hash" spellcheck="false" autocomplete="off">
+        </div>
+        <button class="ghost" id="importTx">Import</button>
+      </div>
+    </div>
+  </details>
+</div>
+
+<!-- 4 GAS -->
+<div class="card">
+  <h2>4 · Gas</h2>
+  <div class="seg" id="gasSeg">
+    <button data-g="floor" >Floor</button>
+    <button data-g="market" class="on">Market</button>
+    <button data-g="fast">Fast 2×</button>
+    <button data-g="aggr">Aggressive 5×</button>
+    <button data-g="custom">Custom</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div class="f">
+      <label>Gas limit</label>
+      <input id="gaslimit" placeholder="e.g. 250000" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="f" id="maxfeeBox">
+      <label>Max fee (gwei)</label>
+      <input id="maxfee" placeholder="auto" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="f" id="prioBox">
+      <label>Priority tip (gwei)</label>
+      <input id="prio" placeholder="0" spellcheck="false" autocomplete="off">
+    </div>
+    <button class="ghost" id="estGas">Estimate limit</button>
+    <button class="ghost" id="refreshGas">Refresh</button>
+  </div>
+  <div class="status" id="gasStatus">Est. cost per tx: <span class="usd" id="gasUsd">—</span> · <span id="gasEth">—</span></div>
+  <div class="hint">Robinhood Chain uses a first-come-first-served sequencer with <b>no public mempool</b> — a bigger tip does <b>not</b> win ordering, latency does. Keep the tip at 0 and set maxFee a few× above the ~0.047 gwei base so you're never priced out. Gas here costs a fraction of a cent.</div>
+</div>
+
+<!-- 5 EXECUTE -->
+<div class="card">
+  <h2>5 · Execute</h2>
+  <div class="row">
+    <div class="f">
+      <label>Txs per wallet / round</label>
+      <input id="count" value="1" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="f">
+      <label>Mode</label>
+      <select id="loopMode">
+        <option value="once">Fire once</option>
+        <option value="repeat">Repeat continuously</option>
+      </select>
+    </div>
+    <div class="f" id="untilBox" style="display:none">
+      <label>Stop after N successes (0 = until stopped)</label>
+      <input id="untilN" value="1" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="f" id="intervalBox" style="display:none">
+      <label>Interval between rounds (ms)</label>
+      <input id="interval" value="1000" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="f">
+      <label>Trigger</label>
+      <select id="trigger">
+        <option value="now">Fire now</option>
+        <option value="block">At block ≥</option>
+        <option value="time">At unix time ≥</option>
+      </select>
+    </div>
+    <div class="f" id="triggerValBox" style="display:none">
+      <label id="triggerValLbl">Value</label>
+      <input id="triggerVal" spellcheck="false" autocomplete="off">
+    </div>
+  </div>
+  <div class="status" id="totalStatus" style="margin-top:8px"></div>
+  <div class="row" style="margin-top:10px">
+    <button class="ghost" id="simulate">Simulate (no send)</button>
+    <button class="fire" id="fire">▲ FIRE MINT</button>
+    <button class="danger" id="stop">Stop</button>
+  </div>
+</div>
+
+<!-- LOG -->
+<div class="card">
+  <div class="logbar">
+    <h2 style="margin:0">Log</h2>
+    <div><button class="ghost" id="copyLog">Copy</button> <button class="ghost" id="clearLog">Clear</button></div>
+  </div>
+  <pre id="log" role="log" aria-live="polite" aria-label="Activity log"></pre>
+</div>
+
+<div class="foot">
+  Client-side only · vendored signer (no runtime CDN) · no localStorage/sessionStorage/cookies/IndexedDB · CSP blocks all external scripts ·
+  key used only for in-browser signing · only signed txs are sent, from your IP, to your RPCs.<br>
+  Source is viewable (view-source) and auditable. For local use, serve with <span class="kv">python3 -m http.server</span> rather than opening the file directly.
+</div>
+
+<script src="vendor/ethers.umd.min.js" integrity="sha384-6Zl0Pc8zjSz8KvmNeXRvUQgY4ryFb+BwDvKCmLYcBME0joAaru491tQgi9B7zsMM" crossorigin="anonymous"></script>
+<script src="app.js"></script>
+</body>
+</html>
