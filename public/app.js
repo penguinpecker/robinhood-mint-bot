@@ -8,19 +8,24 @@
     "rh-main": {
       name: "Robinhood Mainnet", chainId: 4663, coingecko: "ethereum",
       explorerApi: "https://robinhoodchain.blockscout.com/api",
-      rpcs: [
-        "https://rpc.mainnet.chain.robinhood.com",
-        "# Public RPC above is rate-limited. For continuous minting add your own key(s):",
-        "# https://robinhood-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY",
-        "# https://your-endpoint.robinhood-mainnet.quiknode.pro/YOUR_TOKEN/",
+      providers: [
+        { name: "Public (rate-limited)", url: "https://rpc.mainnet.chain.robinhood.com", on: true },
+        { name: "Alchemy", url: "https://robinhood-mainnet.g.alchemy.com/v2/YOUR_KEY" },
+        { name: "QuickNode", url: "https://ENDPOINT.robinhood-mainnet.quiknode.pro/TOKEN/" },
+        { name: "dRPC", url: "https://lb.drpc.org/ogrpc?network=robinhood&dkey=YOUR_KEY" },
+        { name: "Custom", url: "" },
       ],
     },
     "rh-test": {
       name: "Robinhood Testnet", chainId: 46630, coingecko: "ethereum",
       explorerApi: "https://explorer.testnet.chain.robinhood.com/api",
-      rpcs: ["https://rpc.testnet.chain.robinhood.com"],
+      providers: [
+        { name: "Public (rate-limited)", url: "https://rpc.testnet.chain.robinhood.com", on: true },
+        { name: "Alchemy", url: "https://robinhood-testnet.g.alchemy.com/v2/YOUR_KEY" },
+        { name: "Custom", url: "" },
+      ],
     },
-    "custom": { name: "Custom", chainId: 1, coingecko: "ethereum", explorerApi: "", rpcs: [""] },
+    "custom": { name: "Custom", chainId: 1, coingecko: "ethereum", explorerApi: "", providers: [{ name: "Custom", url: "", on: true }] },
   };
 
   // ---------- state (memory only) ----------
@@ -37,6 +42,7 @@
   let ethUsd = null, ethUsdAt = 0;
   let feeGp = null, feeGpAt = 0;
   let running = false, stopFlag = false;
+  let rpcRows = [];          // [{url, on}] — the RPC selector state
 
   // ---------- logging ----------
   const logEl = $("log");
@@ -73,17 +79,40 @@
     else { t.classList.add("mask"); b.textContent = "Show"; }
   };
 
-  // ---------- preset ----------
+  // ---------- preset + RPC selector ----------
   function applyPreset(key) {
     currentPreset = key;
     const c = CHAINS[key];
-    if (key !== "custom") {
-      $("chainId").value = c.chainId;
-      $("explorerApi").value = c.explorerApi;
-      $("rpcs").value = c.rpcs.join("\n");
-    }
+    if (key !== "custom") { $("chainId").value = c.chainId; $("explorerApi").value = c.explorerApi; }
     chainId = BigInt($("chainId").value.trim() || "1");
+    // seed the RPC selector with the providers marked on:true (the public endpoint by default)
+    rpcRows = (c.providers || []).filter((p) => p.on).map((p) => ({ url: p.url, on: true }));
+    if (!rpcRows.length && c.providers && c.providers[0]) rpcRows = [{ url: c.providers[0].url, on: true }];
+    // fill the "add provider" dropdown
+    const sel = $("rpcProvider");
+    sel.innerHTML = (c.providers || [{ name: "Custom", url: "" }]).map((p, i) => '<option value="' + i + '">' + esc(p.name) + "</option>").join("");
+    renderRpcRows();
   }
+  function renderRpcRows() {
+    $("rpcList").innerHTML = rpcRows.map((r, i) =>
+      '<div class="rpcrow"><input type="checkbox" data-i="' + i + '" class="rchk"' + (r.on ? " checked" : "") + '>' +
+      '<input type="text" data-i="' + i + '" class="rurl" value="' + esc(r.url) + '" placeholder="https://… RPC URL" spellcheck="false" autocomplete="off">' +
+      '<button class="rm" data-i="' + i + '" title="remove">✕</button></div>'
+    ).join("");
+  }
+  $("rpcList").addEventListener("input", (e) => {
+    const i = +e.target.dataset.i;
+    if (e.target.classList.contains("rchk")) rpcRows[i].on = e.target.checked;
+    else if (e.target.classList.contains("rurl")) rpcRows[i].url = e.target.value.trim();
+  });
+  $("rpcList").addEventListener("click", (e) => {
+    if (!e.target.classList.contains("rm")) return;
+    rpcRows.splice(+e.target.dataset.i, 1); renderRpcRows();
+  });
+  $("addRpc").onclick = () => {
+    const c = CHAINS[currentPreset]; const p = (c.providers || [])[+$("rpcProvider").value] || { url: "" };
+    rpcRows.push({ url: p.url, on: true }); renderRpcRows();
+  };
   $("preset").onchange = () => applyPreset($("preset").value);
   $("chainId").onchange = () => { chainId = BigInt($("chainId").value.trim() || "1"); };
 
@@ -94,7 +123,7 @@
     return new E.JsonRpcProvider(url, net, { staticNetwork: net, batchMaxCount: 1 });
   }
   function parseRpcList() {
-    return $("rpcs").value.split("\n").map((s) => s.trim()).filter((s) => s && !s.startsWith("#"));
+    return rpcRows.filter((r) => r.on && r.url && !/YOUR_KEY|ENDPOINT|TOKEN|YOUR_ALCHEMY/i.test(r.url)).map((r) => r.url);
   }
   function buildPool() {
     const urls = parseRpcList();
@@ -347,15 +376,47 @@
   };
 
   // ---------- gas ----------
-  $("gasSeg").addEventListener("click", (e) => {
-    const b = e.target.closest("button"); if (!b) return;
-    gasMode = b.dataset.g;
-    for (const btn of $("gasSeg").children) btn.classList.toggle("on", btn === b);
-    const custom = gasMode === "custom";
-    $("maxfee").readOnly = !custom; $("prio").readOnly = !custom;
-    refreshGas();
+  const GAS_PRESETS = [
+    { k: "floor", lbl: "Floor", mult: 1 },
+    { k: "market", lbl: "Market", mult: 2 },
+    { k: "fast", lbl: "Fast", mult: 4 },
+    { k: "aggr", lbl: "Aggr", mult: 10 },
+  ];
+  // the chart bars ARE the preset selector — click a bar to pick that gas level
+  $("gasChart").addEventListener("click", (e) => {
+    const col = e.target.closest(".barcol"); if (!col) return;
+    gasMode = col.dataset.g;
+    $("customFees").classList.add("hidden"); $("gasCustomBtn").classList.remove("on");
+    refreshGas(false);
   });
+  $("gasCustomBtn").onclick = () => {
+    const custom = gasMode !== "custom";
+    gasMode = custom ? "custom" : "market";
+    $("customFees").classList.toggle("hidden", !custom);
+    $("gasCustomBtn").classList.toggle("on", custom);
+    refreshGas(false);
+  };
   $("refreshGas").onclick = () => refreshGas(true);
+
+  // draw the gas-cost bar chart: max $ per preset (gasLimit × preset maxFee × ETH price)
+  function renderGasChart(gp, gl, px) {
+    const floor = E.parseUnits("0.02", "gwei");
+    const bars = GAS_PRESETS.map((p) => {
+      const mf = p.k === "floor" ? (gp > floor ? gp : floor) : gp * BigInt(p.mult);
+      const eth = gl > 0n ? Number(E.formatEther(gl * mf)) : 0;
+      return { ...p, mf, usd: px ? eth * px : null, eth };
+    });
+    const maxUsd = Math.max(...bars.map((b) => b.usd || b.eth || 0), 1e-12);
+    $("gasChart").innerHTML = bars.map((b) => {
+      const h = Math.max(3, Math.round(((b.usd || b.eth || 0) / maxUsd) * 100));
+      const val = b.usd != null ? "$" + b.usd.toFixed(4) : (gl > 0n ? b.eth.toFixed(6) : "—");
+      return '<div class="barcol' + (gasMode === b.k ? " on" : "") + '" data-g="' + b.k + '">' +
+        '<div class="barval">' + val + "</div>" +
+        '<div class="bartrack"><div class="bar" style="height:' + h + '%"></div></div>' +
+        '<div class="barlbl">' + b.lbl + "</div>" +
+        '<div class="bargwei">' + round4(E.formatUnits(b.mf, "gwei")) + "</div></div>";
+    }).join("");
+  }
 
   // cache the network gas price with a short TTL so per-keystroke recompute doesn't spam the RPC
   async function getGasPrice(force) {
@@ -403,9 +464,10 @@
     } else {
       $("gasEth").textContent = "set a gas limit"; $("gasUsd").textContent = "—";
     }
+    renderGasChart(fees.gasPrice || E.parseUnits("0.047", "gwei"), gl, px);
     updateTotal(px);
   }
-  $("gaslimit").addEventListener("input", refreshGas);
+  $("gaslimit").addEventListener("input", () => refreshGas(false));
   $("count").addEventListener("input", () => updateTotal());
 
   async function updateTotal(px) {
@@ -632,7 +694,8 @@
   };
 
   // ---------- init ----------
-  applyPreset("rh-main");
   $("preset").value = "rh-main";
-  log("Ready. Client-side only — nothing is stored. Test the RPC pool, load a burner key, fetch functions, fire.", "ok");
+  applyPreset("rh-main");
+  renderGasChart(E.parseUnits("0.047", "gwei"), 0n, null); // draw bars immediately (no network call)
+  log("Ready. Client-side only — nothing is stored. Test RPCs, load a burner key, fetch functions, fire.", "ok");
 })();
