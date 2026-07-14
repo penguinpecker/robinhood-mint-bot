@@ -1,0 +1,16 @@
+{
+  "name": "rhmbp-contract",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Robinhood Mint Bot Pass — ERC721A test collection",
+  "scripts": {
+    "compile": "node compile.js",
+    "deploy": "node deploy.js"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.1.0",
+    "erc721a": "^4.3.0",
+    "ethers": "^6.13.4",
+    "solc": "0.8.24"
+  }
+}
