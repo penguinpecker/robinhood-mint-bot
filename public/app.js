@@ -8,6 +8,7 @@
     "rh-main": {
       name: "Robinhood Mainnet", chainId: 4663, coingecko: "ethereum",
       explorerApi: "https://robinhoodchain.blockscout.com/api",
+      sequencer: "https://sequencer.mainnet.chain.robinhood.com",
       providers: [
         { name: "Public (rate-limited)", url: "https://rpc.mainnet.chain.robinhood.com", on: true },
         { name: "Alchemy", url: "https://robinhood-mainnet.g.alchemy.com/v2/YOUR_KEY" },
@@ -19,6 +20,7 @@
     "rh-test": {
       name: "Robinhood Testnet", chainId: 46630, coingecko: "ethereum",
       explorerApi: "https://explorer.testnet.chain.robinhood.com/api",
+      sequencer: "https://sequencer.testnet.chain.robinhood.com",
       providers: [
         { name: "Public (rate-limited)", url: "https://rpc.testnet.chain.robinhood.com", on: true },
         { name: "Alchemy", url: "https://robinhood-testnet.g.alchemy.com/v2/YOUR_KEY" },
@@ -27,6 +29,11 @@
     },
     "custom": { name: "Custom", chainId: 1, coingecko: "ethereum", explorerApi: "", providers: [{ name: "Custom", url: "", on: true }] },
   };
+
+  // BulkMinter creation bytecode — constructor(address target, uint256 count, bytes data) payable.
+  // Relays the mint call `count` times in ONE tx. Compiled solc 0.8.24 (paris, opt 200);
+  // deploy verified via eth_call against Robinhood mainnet.
+  const MINTER_BYTECODE = "0x608060405260405161026938038061026983398101604081905261002291610107565b600082156100395761003483346101de565b61003c565b60005b905060005b838110156100c357600080866001600160a01b031684866040516100659190610200565b60006040518083038185875af1925050503d80600081146100a2576040519150601f19603f3d011682016040523d82523d6000602084013e6100a7565b606091505b5091509150816100b957805160208201fd5b5050600101610041565b505050505061021c565b634e487b7160e01b600052604160045260246000fd5b60005b838110156100fe5781810151838201526020016100e6565b50506000910152565b60008060006060848603121561011c57600080fd5b83516001600160a01b038116811461013357600080fd5b6020850151604086015191945092506001600160401b038082111561015757600080fd5b818601915086601f83011261016b57600080fd5b81518181111561017d5761017d6100cd565b604051601f8201601f19908116603f011681019083821181831017156101a5576101a56100cd565b816040528281528960208487010111156101be57600080fd5b6101cf8360208301602088016100e3565b80955050505050509250925092565b6000826101fb57634e487b7160e01b600052601260045260246000fd5b500490565b600082516102128184602087016100e3565b9190910192915050565b603f8061022a6000396000f3fe6080604052600080fdfea26469706673582212206ffc3a20774c8a7f252e64f51bcc9411268868e416216c6f6ef53e3aca3e7d4c64736f6c63430008180033";
 
   // ---------- state (memory only) ----------
   let currentPreset = "rh-main";
@@ -474,20 +481,23 @@
     const gl = $("gaslimit").value.trim() ? BigInt($("gaslimit").value.trim()) : 0n;
     const count = Math.max(1, parseInt($("count").value.trim() || "1", 10));
     const w = Math.max(1, wallets.length);
-    const per = count * w;
+    const bulk = $("method") && $("method").value === "bulk";
+    const mints = count * w;
+    const onchainTx = bulk ? w : mints;
+    const perTxGas = bulk ? gl * BigInt(count) + 120000n : gl;
     let costStr = "";
     if (gl > 0n) {
       try {
         const fees = await computeFees();
         px = px || await getEthUsd();
-        const roundEth = Number(E.formatEther(gl * (fees.gasPrice || fees.maxFeePerGas))) * per;
-        const valEth = parseFloat($("value").value.trim() || "0") * per;
-        const totEth = roundEth + valEth;
-        costStr = " · per round: <b>" + per + " tx</b> · gas ~" + roundEth.toFixed(8) + " ETH" + (valEth ? " + mint value " + valEth + " ETH" : "") +
+        const gasEth = Number(E.formatEther(perTxGas * (fees.gasPrice || fees.maxFeePerGas))) * onchainTx;
+        const valEth = parseFloat($("value").value.trim() || "0") * mints;
+        const totEth = gasEth + valEth;
+        costStr = " · <b>" + mints + " mint(s)</b> / " + onchainTx + " tx · gas ~" + gasEth.toFixed(8) + " ETH" + (valEth ? " + value " + valEth + " ETH" : "") +
           (px ? ' = <span class="usd">$' + (totEth * px).toFixed(2) + "</span>" : "");
       } catch (e) {}
     }
-    $("totalStatus").innerHTML = wallets.length + " wallet(s) × " + count + " tx" + costStr;
+    $("totalStatus").innerHTML = wallets.length + " wallet(s) × " + count + costStr;
   }
 
   $("estGas").onclick = async () => {
@@ -505,6 +515,28 @@
   };
 
   // ---------- execute ----------
+  const METHOD_HINTS = {
+    spray: "Each wallet signs its own mint tx (Txs/wallet each), all raced across your RPC pool. Works even when the contract requires tx.origin == msg.sender. Beat per-wallet caps by loading more wallets.",
+    seq: "Same per-wallet txs, but submitted straight to the chain's sequencer endpoint — bypasses public RPC rate-limits and is the lowest-latency path on this FCFS chain. Reads (nonce/gas) still use your RPC pool.",
+    bulk: "Deploys a throwaway contract that relays your mint call N times in ONE transaction (Txs/wallet = mints per tx). Bypasses per-TX limits for one gas payment. ⚠ Set the mint's recipient arg to YOUR address, and it REVERTS if the contract requires tx.origin == msg.sender.",
+  };
+  function applyMethodUI() {
+    const m = $("method").value;
+    $("methodHint").textContent = METHOD_HINTS[m] || "";
+    $("countLbl").textContent = m === "bulk" ? "Mints per tx" : "Txs / wallet";
+    updateTotal();
+  }
+  $("method").onchange = applyMethodUI;
+
+  // sequencer submission endpoint (submission-only JSON-RPC)
+  let seqEps = null;
+  function getSequencerEps() {
+    const url = (CHAINS[currentPreset] || {}).sequencer;
+    if (!url) return null;
+    if (!seqEps || seqEps[0].url !== url) seqEps = [{ url, provider: makeProvider(url), coolUntil: 0, ok: null }];
+    return seqEps;
+  }
+
   $("loopMode").onchange = () => {
     const rep = $("loopMode").value === "repeat";
     $("untilBox").style.display = rep ? "" : "none";
@@ -541,9 +573,9 @@
   // Race the signed tx to EVERY healthy endpoint at once — fastest path to the single FCFS
   // sequencer wins, and it dedupes by tx hash so duplicates are harmless. Resolves
   // { ok, hash, spent }: ok = accepted or our tx already mined; spent = nonce consumed by another tx.
-  function broadcastRace(raw, label) {
-    const eps = activeProviders().length ? activeProviders() : pool;
-    if (!eps.length) { log("FAIL " + label + ": no RPC endpoints", "bad"); return Promise.resolve({ ok: false, hash: null }); }
+  function broadcastRace(raw, label, targets) {
+    const eps = (targets && targets.length) ? targets : (activeProviders().length ? activeProviders() : pool);
+    if (!eps.length) { log("FAIL " + label + ": no submission endpoints", "bad"); return Promise.resolve({ ok: false, hash: null }); }
     let hash = null;
     try { hash = E.Transaction.from(raw).hash; } catch (e) {}
     return new Promise((resolve) => {
@@ -599,6 +631,16 @@
       fees = await computeFees(true); // force-fresh fee data for the actual broadcast
     } catch (e) { log("Config error: " + (e.shortMessage || e.message), "bad"); return; }
 
+    // ----- mint method: how the tx is built + submitted -----
+    const method = $("method").value;
+    const isBulk = method === "bulk";
+    const mints = count * wallets.length;                 // NFTs attempted
+    const onchainTx = isBulk ? wallets.length : mints;    // actual on-chain txs
+    const perTxValue = isBulk ? value * BigInt(count) : value;
+    const perTxGas = isBulk ? gasLimit * BigInt(count) + 120000n : gasLimit;
+    let submitEps = method === "seq" ? getSequencerEps() : null;
+    if (method === "seq" && !submitEps) { log("No sequencer endpoint for this chain — using RPC pool.", "warn"); }
+
     // Guard: confirm the configured chainId matches what the RPC actually reports
     // (staticNetwork would otherwise let a wrong Chain ID sign an unbroadcastable tx).
     let realCid = null;
@@ -608,11 +650,13 @@
     if (realCid == null) { log("Can't reach any RPC to confirm the chain — test the pool first.", "bad"); return; }
     if (realCid !== cid) { log("Chain ID mismatch: field=" + cid + " but RPC reports " + realCid + ". Fix Chain ID before firing.", "bad"); return; }
 
-    const txCount = count * wallets.length;
-    const totalEth = value * BigInt(txCount);
+    const totalEth = value * BigInt(mints);
     const ok = window.confirm(
-      "FIRE MINT\n\n" + txCount + " tx (" + wallets.length + " wallet × " + count + ")\nto " + contractAddr +
-      "\nchainId " + cid + "\nvalue " + E.formatEther(value) + " ETH each\nTOTAL VALUE ≈ " + E.formatEther(totalEth) + " ETH\n" +
+      "FIRE MINT · " + method.toUpperCase() + "\n\n" + mints + " mint(s) via " + onchainTx + " tx" +
+      (isBulk ? " (bulk: 1 tx × " + count + " mints × " + wallets.length + " wallet)" : " (" + wallets.length + " wallet × " + count + ")") +
+      "\nto " + contractAddr + "\nchainId " + cid + "\nTOTAL VALUE ≈ " + E.formatEther(totalEth) + " ETH\n" +
+      (isBulk ? "⚠ BULK: set the mint recipient to YOUR address in the args; reverts if the contract requires tx.origin==msg.sender.\n" : "") +
+      (method === "seq" && submitEps ? "Submitting via sequencer endpoint.\n" : "") +
       (repeat ? "REPEAT until " + (untilN || "stopped") + " minted, " + interval + "ms interval\n" : "") +
       "\n" + ($("trigger").value === "now" ? "Broadcasts immediately." : "Armed; fires on trigger.") + "\n\nProceed?");
     if (!ok) { log("Fire cancelled.", "warn"); return; }
@@ -635,16 +679,23 @@
           const start = nonceMap[w.address];
           if (start === undefined) continue;
           const signed = [];
-          for (let i = 0; i < count; i++) {
-            const tx = { chainId: cid, to: contractAddr, data, value, gasLimit, nonce: start + i, type: 2, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas };
-            signed.push({ raw: await w.wallet.signTransaction(tx), label: shrink(w.address) + " n" + (start + i) });
+          if (isBulk) {
+            // ONE deploy tx per wallet: BulkMinter(target, count, calldata) relays the mint `count` times
+            const args = E.AbiCoder.defaultAbiCoder().encode(["address", "uint256", "bytes"], [contractAddr, BigInt(count), data]);
+            const tx = { chainId: cid, data: MINTER_BYTECODE + args.slice(2), value: perTxValue, gasLimit: perTxGas, nonce: start, type: 2, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas };
+            signed.push({ raw: await w.wallet.signTransaction(tx), label: shrink(w.address) + " bulk×" + count + " n" + start });
+          } else {
+            for (let i = 0; i < count; i++) {
+              const tx = { chainId: cid, to: contractAddr, data, value: perTxValue, gasLimit: perTxGas, nonce: start + i, type: 2, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas };
+              signed.push({ raw: await w.wallet.signTransaction(tx), label: shrink(w.address) + " n" + (start + i) });
+            }
           }
           batches.push({ address: w.address, signed });
         }
         return batches;
       }
 
-      log("── Pre-signing round 1 (" + txCount + " tx) ──", "ok");
+      log("── Pre-signing round 1 (" + onchainTx + " tx, " + method + ") ──", "ok");
       let batches = await buildRound();
       await warmPool();               // warm connections DURING the wait, not after the trigger
       await waitTrigger();
@@ -653,9 +704,10 @@
       do {
         round++;
         if (round > 1) { batches = await buildRound(); }
-        log("── Broadcasting round " + round + " (racing " + activeProviders().length + " RPC) ──", "ok");
+        const via = method === "seq" && submitEps ? "sequencer-direct" : "racing " + activeProviders().length + " RPC";
+        log("── Broadcasting round " + round + " (" + via + ") ──", "ok");
         const sends = [];
-        for (const b of batches) for (const s of b.signed) { if (stopFlag) break; sends.push(broadcastRace(s.raw, s.label).then((r) => ({ addr: b.address, r }))); }
+        for (const b of batches) for (const s of b.signed) { if (stopFlag) break; sends.push(broadcastRace(s.raw, s.label, submitEps).then((r) => ({ addr: b.address, r }))); }
         const res = await Promise.all(sends);
         const roundHashes = [];
         for (const x of res) { if (x.r.ok) { broadcastN++; if (x.r.hash) roundHashes.push(x.r.hash); } if (x.r.spent) resync.add(x.addr); }
@@ -688,14 +740,25 @@
     if (!wallets.length) { log("Load a wallet first.", "bad"); return; }
     if (!contractAddr) { log("Set the contract address.", "bad"); return; }
     try {
-      const res = await rpc((p) => p.call({ from: wallets[0].address, to: contractAddr, data: getCalldata(), value: E.parseEther($("value").value.trim() || "0") }));
-      log("Simulate OK (no revert). return " + (res === "0x" ? "(empty)" : res.slice(0, 42) + "…"), "ok");
+      const data = getCalldata();
+      const value = E.parseEther($("value").value.trim() || "0");
+      if ($("method").value === "bulk") {
+        // simulate the BulkMinter deploy running the mint loop `count` times (eth_call on the initcode)
+        const count = Math.max(1, parseInt($("count").value.trim() || "1", 10));
+        const args = E.AbiCoder.defaultAbiCoder().encode(["address", "uint256", "bytes"], [contractAddr, BigInt(count), data]);
+        await rpc((p) => p.call({ from: wallets[0].address, data: MINTER_BYTECODE + args.slice(2), value: value * BigInt(count) }));
+        log("Simulate OK — bulk deploy ran " + count + " mint(s) without reverting.", "ok");
+      } else {
+        const res = await rpc((p) => p.call({ from: wallets[0].address, to: contractAddr, data, value }));
+        log("Simulate OK (no revert). return " + (res === "0x" ? "(empty)" : res.slice(0, 42) + "…"), "ok");
+      }
     } catch (e) { log("Simulate reverted: " + (e.shortMessage || e.reason || e.message), "bad"); }
   };
 
   // ---------- init ----------
   $("preset").value = "rh-main";
   applyPreset("rh-main");
+  applyMethodUI();
   renderGasChart(E.parseUnits("0.047", "gwei"), 0n, null); // draw bars immediately (no network call)
   log("Ready. Client-side only — nothing is stored. Test RPCs, load a burner key, fetch functions, fire.", "ok");
 })();

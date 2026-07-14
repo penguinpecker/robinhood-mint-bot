@@ -196,7 +196,14 @@
   <div class="card c7">
     <h2>Execute</h2>
     <div class="row">
-      <div class="f"><label>Txs / wallet</label><input id="count" value="1" spellcheck="false" autocomplete="off"></div>
+      <div class="f" style="flex:2 1 220px"><label>Mint method — how the tx is sent</label>
+        <select id="method">
+          <option value="spray">Spray — 1 tx per wallet, raced across RPCs</option>
+          <option value="seq">Sequencer-direct — bypass RPCs, straight to sequencer</option>
+          <option value="bulk">Bulk — 1 contract tx does N mints</option>
+        </select>
+      </div>
+      <div class="f"><label id="countLbl">Txs / wallet</label><input id="count" value="1" spellcheck="false" autocomplete="off"></div>
       <div class="f"><label>Mode</label>
         <select id="loopMode"><option value="once">Fire once</option><option value="repeat">Repeat</option></select></div>
       <div class="f hidden" id="untilBox"><label>Stop after N minted (0=∞)</label><input id="untilN" value="1" spellcheck="false" autocomplete="off"></div>
@@ -206,6 +213,7 @@
       <div class="f hidden" id="triggerValBox"><label id="triggerValLbl">Value</label><input id="triggerVal" spellcheck="false" autocomplete="off"></div>
     </div>
     <div class="status" id="totalStatus"></div>
+    <div class="hint" id="methodHint"></div>
     <div class="row" style="margin-top:10px">
       <button class="ghost" id="simulate">Simulate</button>
       <button class="fire" id="fire">▲ FIRE MINT</button>

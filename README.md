@@ -31,6 +31,17 @@ static site, but runs **entirely in the user's browser** — private keys never 
   live chain gas price × gas limit × ETH price (CoinGecko). On Robinhood's FCFS sequencer, tip buys no priority —
   the UI reflects this (tip 0, latency wins).
 - **Multi-wallet** — one key per line; per-wallet pending-nonce batching.
+- **Selectable mint methods** — the same mint, sent three different ways on-chain:
+  - **Spray** (default) — each wallet signs its own mint tx, all raced across the RPC pool. Works even when the
+    contract enforces `tx.origin == msg.sender`. Beat per-wallet caps with more wallets.
+  - **Sequencer-direct** — same per-wallet txs, submitted straight to the chain's sequencer endpoint (bypasses
+    public-RPC rate limits; lowest latency on the single FCFS sequencer). Reads still use the RPC pool.
+  - **Bulk** — deploys a throwaway `BulkMinter` contract that relays the mint call **N times in one transaction**
+    (bytecode embedded, verified via `eth_call` deploy-simulation). Bypasses per-*tx* limits for one gas payment.
+    Set the mint's recipient arg to your own address; it **reverts** if the contract requires `tx.origin == msg.sender`.
+  - Advanced methods not shipped by default (documented for reference): a **CREATE2 disposable-minter army** (fresh
+    `msg.sender` per child to defeat per-wallet caps + `extcodesize` gates) and **EIP-7702 self-delegation** (the only
+    contract-style method that survives a `tx.origin == msg.sender` gate).
 - **Continuous / triggered firing** — fire once or repeat until N successes / until stopped, with an interval;
   optional trigger at a block height or unix time. All transactions are **pre-signed before the trigger** for the
   lowest possible fire-time latency.
