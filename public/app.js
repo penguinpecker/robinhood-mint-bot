@@ -302,7 +302,8 @@
     return out;
   }
 
-  $("fetchFns").onclick = async () => {
+  $("fetchFns").onclick = () => fetchFunctions();
+  async function fetchFunctions() {
     const addr = parseAddr($("contract").value);
     if (!addr) { log("Couldn't find a contract address in that input.", "bad"); return; }
     contractAddr = addr;
@@ -347,7 +348,7 @@
     } catch (e) {
       $("abiStatus").innerHTML = '<span class="bad">ABI fetch failed: ' + esc(e.shortMessage || e.message) + "</span>";
     }
-  };
+  }
 
   $("fnList").addEventListener("click", (e) => {
     const chip = e.target.closest(".chip"); if (!chip) return;
@@ -825,6 +826,122 @@
     try { await simulateOnce(); log("Simulate OK — this mint would not revert.", "ok"); }
     catch (e) { log("Simulate reverted: " + decodeRevert(e), "bad"); }
   };
+
+  // ---------- live SeaDrop drops feed ----------
+  const SEADROP = "0x00005EA00Ac477B1030CE78506496e8C2dE24bf5";
+  const OS_FEE = "0x0000a26b00c1F0DF003000390027140000fAa719"; // OpenSea's default allowed fee recipient
+  const ZERO = "0x0000000000000000000000000000000000000000";
+  const SD_EVENTS = new E.Interface([
+    "event PublicDropUpdated(address indexed nftContract, tuple(uint80 mintPrice,uint48 startTime,uint48 endTime,uint16 maxTotalMintableByWallet,uint16 feeBps,bool restrictFeeRecipients) publicDrop)",
+    "event SeaDropMint(address indexed nftContract, address indexed minter, address indexed feeRecipient, address payer, uint256 quantityMinted, uint256 unitMintPrice, uint256 feeBps, uint256 dropStageIndex)",
+  ]);
+  const SD_READ = new E.Interface([
+    "function getPublicDrop(address) view returns (tuple(uint80 mintPrice,uint48 startTime,uint48 endTime,uint16 maxTotalMintableByWallet,uint16 feeBps,bool restrictFeeRecipients))",
+    "function getAllowedFeeRecipients(address) view returns (address[])",
+  ]);
+  const NFT_MINI = ["function name() view returns (string)", "function totalSupply() view returns (uint256)", "function maxSupply() view returns (uint256)"];
+  const EXPLORER_BASE = "https://robinhoodchain.blockscout.com";
+  const fmtPrice = (wei) => wei === 0n ? "FREE" : E.formatEther(wei) + " ETH";
+  let feedItems = [], feedTimer = null, feedUnitPrice = 0n;
+
+  async function throttle(arr, n, fn) {
+    const out = []; let i = 0;
+    const worker = async () => { while (i < arr.length) { const k = i++; out[k] = await fn(arr[k]); } };
+    await Promise.all(Array.from({ length: Math.min(n, arr.length || 1) }, worker));
+    return out;
+  }
+
+  async function enrichCollection(nft) {
+    try {
+      const [name, pd] = await Promise.all([
+        rpc((p) => new E.Contract(nft, NFT_MINI, p).name()).catch(() => "?"),
+        rpc((p) => new E.Contract(SEADROP, SD_READ, p).getPublicDrop(nft)),
+      ]);
+      let minted = null, max = null;
+      try { minted = await rpc((p) => new E.Contract(nft, NFT_MINI, p).totalSupply()); } catch (e) {}
+      try { max = await rpc((p) => new E.Contract(nft, NFT_MINI, p).maxSupply()); } catch (e) {}
+      const now = Math.floor(Date.now() / 1000);
+      const start = Number(pd[1]), end = Number(pd[2]);
+      let status = "closed";
+      if (max != null && minted != null && max > 0n && minted >= max) status = "sold";
+      else if (now < start) status = "soon";
+      else if (now >= start && now <= end) status = "live";
+      return { nft, name, price: pd[0], start, end, maxWallet: Number(pd[3]), restrictFee: pd[5], minted, max, status };
+    } catch (e) { return null; }
+  }
+
+  async function loadFeed() {
+    if (!pool.length) buildPool();
+    $("feedRefresh").disabled = true;
+    $("feedStatus").textContent = "Scanning SeaDrop activity on-chain…";
+    try {
+      const seen = new Set(), order = [];
+      // recent activity (mints + config updates) — captures what's minting now
+      let next = null;
+      for (let page = 0; page < 2; page++) {
+        const qs = next ? "?" + new URLSearchParams(next).toString() : "";
+        const j = await (await fetch(EXPLORER_BASE + "/api/v2/addresses/" + SEADROP + "/logs" + qs)).json();
+        for (const it of (j.items || [])) {
+          try { const pl = SD_EVENTS.parseLog({ topics: (it.topics || []).filter(Boolean), data: it.data }); const nft = pl.args.nftContract; if (!seen.has(nft)) { seen.add(nft); order.push(nft); } } catch (e) {}
+        }
+        next = j.next_page_params; if (!next) break;
+      }
+      // newest configured drops (may have no mints yet)
+      try {
+        const t0 = SD_EVENTS.getEvent("PublicDropUpdated").topicHash;
+        const j2 = await (await fetch(EXPLORER_BASE + "/api?module=logs&action=getLogs&address=" + SEADROP + "&topic0=" + t0 + "&fromBlock=0&toBlock=latest")).json();
+        for (const lg of (j2.result || []).reverse()) { const nft = E.getAddress("0x" + lg.topics[1].slice(26)); if (!seen.has(nft)) { seen.add(nft); order.push(nft); } if (order.length > 40) break; }
+      } catch (e) {}
+
+      const top = order.slice(0, 18);
+      $("feedStatus").textContent = "Reading " + top.length + " collections…";
+      const rank = { live: 0, soon: 1, closed: 2, sold: 3 };
+      feedItems = (await throttle(top, 4, enrichCollection)).filter(Boolean).sort((a, b) => (rank[a.status] ?? 4) - (rank[b.status] ?? 4));
+      renderFeed(feedItems);
+      const liveN = feedItems.filter((i) => i.status === "live").length;
+      $("feedStatus").innerHTML = feedItems.length + " collections · <span class='ok'>" + liveN + " live now</span> · click one to load it into the bot.";
+    } catch (e) { $("feedStatus").innerHTML = "<span class='bad'>Feed failed: " + esc(e.shortMessage || e.message) + "</span>"; }
+    finally { $("feedRefresh").disabled = false; }
+  }
+
+  function renderFeed(items) {
+    if (!items.length) { $("feedList").innerHTML = '<div class="hint">No SeaDrop drops found.</div>'; return; }
+    const badges = { live: '<span class="badge live">LIVE</span>', soon: '<span class="badge soon">SOON</span>', sold: '<span class="badge sold">SOLD OUT</span>', closed: '<span class="badge closed">closed</span>' };
+    $("feedList").innerHTML = items.map((it, i) => {
+      const supply = (it.minted != null && it.max != null && it.max > 0n) ? it.minted + "/" + it.max : (it.minted != null ? it.minted + " minted" : "—");
+      return '<div class="drop" data-i="' + i + '">' + (badges[it.status] || "") +
+        '<div class="dn">' + esc(it.name || "?") + "</div>" +
+        '<div class="dm"><b>' + fmtPrice(it.price) + "</b> · " + supply + " · max " + it.maxWallet + "/wallet</div>" +
+        '<div class="dm">' + shrink(it.nft) + "</div></div>";
+    }).join("");
+  }
+  $("feedList").addEventListener("click", (e) => { const d = e.target.closest(".drop"); if (d) loadCollectionIntoBot(feedItems[+d.dataset.i]); });
+
+  async function loadCollectionIntoBot(item) {
+    if (!item) return;
+    log("Loading " + (item.name || shrink(item.nft)) + " …", "");
+    let fee = OS_FEE;
+    try { if (item.restrictFee) { const fr = await rpc((p) => new E.Contract(SEADROP, SD_READ, p).getAllowedFeeRecipients(item.nft)); if (fr && fr.length) fee = fr[0]; } } catch (e) {}
+    $("contract").value = SEADROP;
+    await fetchFunctions(); // loads SeaDrop ABI + chips (also sets contractIface for error decoding)
+    const idx = abiFragments.findIndex((f) => f.name === "mintPublic" && f.inputs.length === 4);
+    if (idx < 0) { log("mintPublic not found on the SeaDrop ABI — use raw calldata.", "bad"); return; }
+    for (const c of $("fnList").children) c.classList.toggle("on", +c.dataset.i === idx);
+    selectFn(idx);
+    $("p0").value = item.nft; $("p1").value = fee; $("p2").value = ZERO; $("p3").value = "1";
+    encodeSelected();
+    feedUnitPrice = item.price;
+    $("value").value = E.formatEther(item.price); // exact per-1 price; SeaDrop requires exact payment
+    $("value").dispatchEvent(new Event("input"));
+    // keep value = price × quantity as the user edits quantity
+    $("p3").addEventListener("input", () => { try { const q = BigInt($("p3").value.trim() || "0"); $("value").value = E.formatEther(feedUnitPrice * q); $("value").dispatchEvent(new Event("input")); } catch (e) {} });
+    const live = item.status === "live";
+    log("Loaded " + (item.name || "collection") + " — mintPublic ready · " + fmtPrice(item.price) + " each · max " + item.maxWallet + "/wallet. " + (live ? "🟢 LIVE — set quantity and Fire." : "⚠ not live right now (" + item.status + ")."), live ? "ok" : "warn");
+    document.getElementById("fire").scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  $("feedRefresh").onclick = loadFeed;
+  $("feedAuto").onchange = () => { clearInterval(feedTimer); if ($("feedAuto").checked) { loadFeed(); feedTimer = setInterval(loadFeed, 30000); } };
 
   // ---------- init ----------
   $("preset").value = "rh-main";
